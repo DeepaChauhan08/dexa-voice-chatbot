@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dexa AI Assistant</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="app">
+
+    <!-- ================================= -->
+    <!-- SIDEBAR -->
+    <!-- ================================= -->
+    <aside class="sidebar">
+
+        <div class="logo">
+            <div class="logo-icon">✦</div>
+            <div>
+                <h2>Dexa</h2>
+                <span>AI Assistant</span>
+            </div>
+        </div>
+
+        <button class="new-chat-button" onclick="createNewChat()">
+            ＋ New Chat
+        </button>
+
+        <div class="history-title">Chat History</div>
+
+        <div id="historyList" class="history-list"></div>
+
+        <button class="clear-history-button" onclick="clearHistory()">
+            🗑 Clear All History
+        </button>
+
+    </aside>
+
+    <!-- ================================= -->
+    <!-- MAIN -->
+    <!-- ================================= -->
+    <main class="main">
+
+        <!-- HEADER -->
+        <header class="header">
+            <div>
+                <h1>Dexa AI</h1>
+                <p>Your personal AI assistant</p>
+            </div>
+            <div class="online-status">
+                <span class="online-dot"></span>
+                Online
+            </div>
+        </header>
+
+        <!-- CHATBOX -->
+        <section id="chatbox" class="chatbox">
+            <div class="welcome">
+                <div class="welcome-icon">✦</div>
+                <h2>Hello! I'm Dexa.</h2>
+                <p>Ask me anything or use the microphone.</p>
+
+                <div class="suggestions">
+                    <button onclick="useSuggestion('Explain DBMS in simple words')">Explain DBMS</button>
+                    <button onclick="useSuggestion('What is Python?')">What is Python?</button>
+                    <button onclick="useSuggestion('Help me prepare for an interview')">Interview Help</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- INPUT SECTION -->
+        <section class="input-section">
+            <div class="input-container">
+                <input
+                    type="text"
+                    id="textInput"
+                    placeholder="Ask Dexa something..."
+                    autocomplete="off"
+                >
+                <button id="micButton" class="mic-button" onclick="startVoice()">
+                    🎤
+                </button>
+                <button class="send-button" onclick="sendMessage()">
+                    ➤
+                </button>
+            </div>
+
+            <div class="voice-controls">
+                <button onclick="readAnswer()">🔊 Read Answer</button>
+                <button onclick="stopReading()">⏹ Stop</button>
+            </div>
+        </section>
+
+    </main>
+
+</div>
+
+<script>
+// State management
+let currentSessionId = null;
+let lastAIResponse = "";
+let recognition = null;
+
+// Initialize on page load
+window.addEventListener("load", async function() {
+    await loadSessions();
+
+    const savedSession = localStorage.getItem("dexa_session");
+    if (savedSession) {
+        const sessionId = parseInt(savedSession);
+        const response = await fetch(`/history/${sessionId}`);
+
+        if (response.ok) {
+            currentSessionId = sessionId;
+            await loadMessages(sessionId);
+            return;
+        }
+    }
+
+    await createNewChat(false);
+});
+
+// Handle Enter key for submission
+document.getElementById("textInput").addEventListener("keydown", function(event) {
+    if (event.key === "Enter") {
+        sendMessage();
+    }
+});
+
+// Create new chat session
+async function createNewChat(showWelcomeScreen = true) {
+    const response = await fetch("/new-chat", { method: "POST" });
+    const data = await response.json();
+
+    currentSessionId = data.session_id;
+    localStorage.setItem("dexa_session", currentSessionId);
+
+    if (showWelcomeScreen) {
+        showWelcome();
+    }
+
+    await loadSessions();
+}
+
+// Send user prompt to server
+async function sendMessage() {
+    const input = document.getElementById("textInput");
+    const message = input.value.trim();
+
+    if (!message) return;
+
+    if (!currentSessionId) {
+        await createNewChat(false);
+    }
+
+    input.value = "";
+    addUserMessage(message);
+    showTyping();
+
+    try {
+        const response = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                message: message,
+                session_id: currentSessionId
+            })
+        });
+
+        const data = await response.json();
+        removeTyping();
+
+        if (data.session_id) {
+            currentSessionId = data.session_id;
+            localStorage.setItem("dexa_session", currentSessionId);
+        }
+
+        addAIMessage(data.reply);
+        await loadSessions();
+    } catch (error) {
+        removeTyping();
+        addAIMessage("Unable to connect to Dexa server.");
+        console.error(error);
+    }
+}
+
+// Append user message bubble to DOM
+function addUserMessage(text) {
+    const chatbox = document.getElementById("chatbox");
+    removeWelcome();
+
+    const message = document.createElement("div");
+    message.className = "message user-message";
+    message.innerHTML = `
+        <div class="avatar user-avatar">👤</div>
+        <div class="message-content">
+            <div class="sender">You</div>
+            <div class="bubble user-bubble">${escapeHTML(text)}</div>
+        </div>
+    `;
+
+    chatbox.appendChild(message);
+    scrollChat();
+}
+
+// Append AI response bubble with typing effect to DOM
+function addAIMessage(text) {
+    const chatbox = document.getElementById("chatbox");
+
+    const message = document.createElement("div");
+    message.className = "message ai-message";
+    message.innerHTML = `
+        <div class="avatar ai-avatar">✦</div>
+        <div class="message-content">
+            <div class="sender">Dexa</div>
+            <div class="bubble ai-bubble"><span class="typing-text"></span></div>
+        </div>
+    `;
+
+    chatbox.appendChild(message);
+    const element = message.querySelector(".typing-text");
+    typeText(element, text);
+
+    lastAIResponse = text;
+    scrollChat();
+}
+
+// Stream text typewriter effect
+function typeText(element, text) {
+    let index = 0;
+    function type() {
+        if (index < text.length) {
+            element.textContent += text[index];
+            index++;
+            setTimeout(type, 12);
+        }
+    }
+    type();
+}
+
+// Render thinking state indicator
+function showTyping() {
+    const chatbox = document.getElementById("chatbox");
+    const typing = document.createElement("div");
+    typing.id = "typingIndicator";
+    typing.className = "message ai-message";
+    typing.innerHTML = `
+        <div class="avatar ai-avatar">✦</div>
+        <div class="message-content">
+            <div class="sender">Dexa</div>
+            <div class="bubble ai-bubble">Thinking...</div>
+        </div>
+    `;
+
+    chatbox.appendChild(typing);
+    scrollChat();
+}
+
+// Remove thinking state indicator
+function removeTyping() {
+    const element = document.getElementById("typingIndicator");
+    if (element) {
+        element.remove();
+    }
+}
+
+// Browser speech-to-text integration
+function startVoice() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+        alert("Voice recognition is not supported in this browser.");
+        return;
+    }
+
+    recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    const mic = document.getElementById("micButton");
+    mic.classList.add("recording");
+
+    recognition.start();
+
+    recognition.onresult = function(event) {
+        const text = event.results[0][0].transcript;
+        document.getElementById("textInput").value = text;
+        sendMessage();
+    };
+
+    recognition.onerror = function(event) {
+        console.log("Voice error:", event.error);
+    };
+
+    recognition.onend = function() {
+        mic.classList.remove("recording");
+    };
+}
+
+// Browser text-to-speech output
+function readAnswer() {
+    if (!lastAIResponse) return;
+
+    speechSynthesis.cancel();
+    const speech = new SpeechSynthesisUtterance(lastAIResponse);
+    speech.lang = "en-US";
+    speech.rate = 1;
+    speech.pitch = 1;
+    speechSynthesis.speak(speech);
+}
+
+// Halt text-to-speech output
+function stopReading() {
+    speechSynthesis.cancel();
+}
+
+// Fetch and render session list in sidebar
+async function loadSessions() {
+    try {
+        const response = await fetch("/sessions");
+        const sessions = await response.json();
+        const list = document.getElementById("historyList");
+        list.innerHTML = "";
+
+        if (sessions.length === 0) {
+            list.innerHTML = `<div class="empty-history">No conversations yet.</div>`;
+            return;
+        }
+
+        sessions.forEach(function(session) {
+            const item = document.createElement("div");
+            item.className = "history-item";
+
+            if (session.id === currentSessionId) {
+                item.classList.add("active");
+            }
+
+            item.innerHTML = `
+                <div class="history-chat" onclick="openChat(${session.id})">
+                    <span>💬</span>
+                    <span class="chat-title">${escapeHTML(session.title)}</span>
+                </div>
+                <button class="delete-button" onclick="deleteChat(${session.id}, event)">×</button>
+            `;
+
+            list.appendChild(item);
+        });
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+// Open and switch to an existing chat session
+async function openChat(sessionId) {
+    currentSessionId = sessionId;
+    localStorage.setItem("dexa_session", sessionId);
+    await loadMessages(sessionId);
+    await loadSessions();
+}
+
+// Load conversation history for a specific session
+async function loadMessages(sessionId) {
+    try {
+        const response = await fetch(`/history/${sessionId}`);
+        if (!response.ok) return;
+
+        const data = await response.json();
+        const chatbox = document.getElementById("chatbox");
+        chatbox.innerHTML = "";
+        lastAIResponse = "";
+
+        data.messages.forEach(function(message) {
+            if (message.role === "user") {
+                addUserMessage(message.content);
+            }
+            if (message.role === "assistant") {
+                addAIMessage(message.content);
+            }
+        });
+
+        if (data.messages.length === 0) {
+            showWelcome();
+        }
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+// Delete an individual chat session
+async function deleteChat(sessionId, event) {
+    event.stopPropagation();
+    const confirmed = confirm("Delete this conversation?");
+    if (!confirmed) return;
+
+    await fetch(`/delete-chat/${sessionId}`, { method: "DELETE" });
+
+    if (sessionId === currentSessionId) {
+        currentSessionId = null;
+        localStorage.removeItem("dexa_session");
+        await createNewChat();
+    }
+
+    await loadSessions();
+}
+
+// Clear all sessions and wipe database conversation records
+async function clearHistory() {
+    const confirmed = confirm("Delete ALL chat history?");
+    if (!confirmed) return;
+
+    await fetch("/clear-history", { method: "DELETE" });
+
+    currentSessionId = null;
+    localStorage.removeItem("dexa_session");
+    showWelcome();
+    await createNewChat(false);
+    await loadSessions();
+}
+
+// Fill input from suggestion chips
+function useSuggestion(text) {
+    document.getElementById("textInput").value = text;
+    sendMessage();
+}
+
+// Render empty state welcome message
+function showWelcome() {
+    const chatbox = document.getElementById("chatbox");
+    chatbox.innerHTML = `
+        <div class="welcome">
+            <div class="welcome-icon">✦</div>
+            <h2>Hello! I'm Dexa.</h2>
+            <p>Ask me anything or use the microphone.</p>
+            <div class="suggestions">
+                <button onclick="useSuggestion('Explain DBMS in simple words')">Explain DBMS</button>
+                <button onclick="useSuggestion('What is Python?')">What is Python?</button>
+                <button onclick="useSuggestion('Help me prepare for an interview')">Interview Help</button>
+            </div>
+        </div>
+    `;
+}
+
+// Remove welcome container on first message
+function removeWelcome() {
+    const welcome = document.querySelector(".welcome");
+    if (welcome) {
+        welcome.remove();
+    }
+}
+
+// Auto-scroll chat view to bottom
+function scrollChat() {
+    const chatbox = document.getElementById("chatbox");
+    chatbox.scrollTop = chatbox.scrollHeight;
+}
+
+// Sanitize user inputs against HTML injection
+function escapeHTML(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+
+</body>
+</html>
